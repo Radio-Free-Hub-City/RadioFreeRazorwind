@@ -5,7 +5,10 @@ RadioFreeRazorwindDB = RadioFreeRazorwindDB or {
     radioEnabled = true,
     volume = 1.0,
     selectedVoiceID = 0,
-    commercialFrequency = 2 -- Default: Commercial every 2 songs (0 = Off)
+    commercialFrequency = 2, -- Default: Commercial every 2 songs (0 = Off)
+    newsFrequency = 5,       -- Default: News every 5 songs (0 = Off)
+    streamerMode = false,    -- Streamer mode toggle
+    customCommercial = "Support the stream at twitch.tv/yourchannel!" -- Default custom ad text
 }
 
 local currentTrackIndex = nil
@@ -13,10 +16,13 @@ local radioTimer = nil
 local trackStartTime = 0
 local currentTrackDuration = 0
 local isCommercialPlaying = false
+local isNewsPlaying = false
+local isScanning = false
 local songsPlayedSinceCommercial = 0
+local songsPlayedSinceNews = 0
 
 --------------------------------------------------
--- PLAYLIST & ALL-TTS COMMERCIAL LIST
+-- PLAYLIST, COMMERCIALS, NEWS & STATIC SFX
 --------------------------------------------------
 local musicPlaylist = {
     { title = "Graves Lament", fdid = 1676892, duration = 312 },
@@ -66,6 +72,26 @@ local commercialList = {
     }
 }
 
+local newsList = {
+    { display = "NEWS: GNOMES TO RETAKE HOME", fdid = 222760, duration = 37 },
+    { display = "NEWS: WAR COMING?", fdid = 222758, duration = 45 },
+    { display = "NEWS: TRAGEDY IN IRONFORGE", fdid = 222759, duration = 48 },
+    { display = "NEWS: MALFURION RETURNS", fdid = 222762, duration = 29 },
+    { display = "NEWS: FORESAKEN WRONGLY BLAMED", fdid = 222766, duration = 54 },
+    { display = "NEWS: THRALL WANTS YOU!", fdid = 466155, duration = 36 }
+}
+
+local staticList = {
+    569693,
+    568039,
+    568977,
+    568792,
+    569734,
+    568565,
+    568775,
+    568777
+}
+
 --------------------------------------------------
 -- SAFE TTS WRAPPER
 --------------------------------------------------
@@ -75,7 +101,7 @@ local function SpeakTTS(text)
         local rate = Enum.VoiceChatSpeakTextRate and Enum.VoiceChatSpeakTextRate.Standard or 0
         C_VoiceChat.SpeakText(voiceID, text, rate, 100)
     else
-        print("|cFF00FF00[RFR Commercial]:|r " .. text)
+        print("|cFF00FF00[RFR TTS]:|r " .. text)
     end
 end
 
@@ -83,7 +109,7 @@ end
 -- RADIO CHASSIS FRAME
 --------------------------------------------------
 local mainFrame = CreateFrame("Frame", "RFR_MainFrame", UIParent, "BackdropTemplate")
-mainFrame:SetSize(360, 240)
+mainFrame:SetSize(360, 340) -- Height adjusted to fit Streamer Mode controls
 mainFrame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
 mainFrame:Hide()
 
@@ -146,6 +172,15 @@ end
 local PlayRandomTrack
 local PlayTrack
 local PlayCommercial
+local PlayNews
+local QueueNextMedia
+local ScanAndTune
+
+local function ShouldPlayNews()
+    local freq = RadioFreeRazorwindDB and RadioFreeRazorwindDB.newsFrequency or 5
+    if freq <= 0 then return false end
+    return songsPlayedSinceNews >= freq
+end
 
 local function ShouldPlayCommercial()
     local freq = RadioFreeRazorwindDB and RadioFreeRazorwindDB.commercialFrequency or 2
@@ -153,16 +188,72 @@ local function ShouldPlayCommercial()
     return songsPlayedSinceCommercial >= freq
 end
 
+QueueNextMedia = function()
+    if ShouldPlayNews() then
+        PlayNews()
+    elseif ShouldPlayCommercial() then
+        PlayCommercial()
+    else
+        PlayRandomTrack()
+    end
+end
+
+PlayNews = function()
+    isNewsPlaying = true
+    isCommercialPlaying = false
+    isScanning = false
+    songsPlayedSinceNews = 0
+
+    local newsItem = newsList[math.random(1, #newsList)]
+    local introDuration = 4
+
+    trackStartTime = GetTime()
+    currentTrackDuration = newsItem.duration + introDuration
+    lcdDisplay.nowPlaying:SetText(newsItem.display)
+
+    SpeakTTS("And now the latest news")
+
+    if radioTimer then radioTimer:Cancel() end
+
+    radioTimer = C_Timer.NewTimer(introDuration, function()
+        SetCVar("Sound_EnableMusic", 1)
+        PlayMusic(newsItem.fdid)
+
+        radioTimer = C_Timer.NewTimer(newsItem.duration, function()
+            isNewsPlaying = false
+            QueueNextMedia()
+        end)
+    end)
+end
+
 PlayCommercial = function()
     isCommercialPlaying = true
+    isNewsPlaying = false
+    isScanning = false
     songsPlayedSinceCommercial = 0
 
-    local comm = commercialList[math.random(1, #commercialList)]
-    trackStartTime = GetTime()
-    currentTrackDuration = comm.duration
-    lcdDisplay.nowPlaying:SetText(comm.display)
+    local commText = ""
+    local commDisplay = ""
+    local commDuration = 6
 
-    SpeakTTS(comm.text)
+    -- Check if Streamer Mode is enabled and custom text exists
+    if RadioFreeRazorwindDB.streamerMode and RadioFreeRazorwindDB.customCommercial and RadioFreeRazorwindDB.customCommercial ~= "" then
+        commText = RadioFreeRazorwindDB.customCommercial
+        commDisplay = "COMMERCIAL: STREAMER PROMO"
+        -- Estimate spoken TTS duration based on length (~12 chars per sec, min 5 seconds)
+        commDuration = math.max(5, math.ceil(string.len(commText) / 12))
+    else
+        local comm = commercialList[math.random(1, #commercialList)]
+        commText = comm.text
+        commDisplay = comm.display
+        commDuration = comm.duration
+    end
+
+    trackStartTime = GetTime()
+    currentTrackDuration = commDuration
+    lcdDisplay.nowPlaying:SetText(commDisplay)
+
+    SpeakTTS(commText)
 
     local nextIndex = math.random(1, #musicPlaylist)
     if #musicPlaylist > 1 and nextIndex == currentTrackIndex then
@@ -177,21 +268,17 @@ PlayCommercial = function()
 
     if radioTimer then radioTimer:Cancel() end
 
-    radioTimer = C_Timer.NewTimer(comm.duration, function()
+    radioTimer = C_Timer.NewTimer(commDuration, function()
         isCommercialPlaying = false
         songsPlayedSinceCommercial = 1
         
-        trackStartTime = GetTime() - comm.duration
+        trackStartTime = GetTime() - commDuration
         currentTrackDuration = track.duration
         lcdDisplay.nowPlaying:SetText("PLAYING: " .. track.title:upper())
 
-        local remainingTime = track.duration - comm.duration
+        local remainingTime = track.duration - commDuration
         radioTimer = C_Timer.NewTimer(remainingTime, function()
-            if ShouldPlayCommercial() then
-                PlayCommercial()
-            else
-                PlayRandomTrack()
-            end
+            QueueNextMedia()
         end)
     end)
 end
@@ -199,8 +286,11 @@ end
 PlayTrack = function(index)
     if not musicPlaylist[index] then return end
     isCommercialPlaying = false
+    isNewsPlaying = false
+    isScanning = false
     currentTrackIndex = index
     songsPlayedSinceCommercial = songsPlayedSinceCommercial + 1
+    songsPlayedSinceNews = songsPlayedSinceNews + 1
     
     local track = musicPlaylist[index]
 
@@ -215,11 +305,7 @@ PlayTrack = function(index)
     lcdDisplay.nowPlaying:SetText("PLAYING: " .. track.title:upper())
 
     radioTimer = C_Timer.NewTimer(track.duration, function()
-        if ShouldPlayCommercial() then
-            PlayCommercial()
-        else
-            PlayRandomTrack()
-        end
+        QueueNextMedia()
     end)
 end
 
@@ -231,52 +317,39 @@ PlayRandomTrack = function()
     PlayTrack(nextIndex)
 end
 
+ScanAndTune = function()
+    StopMusic()
+    if radioTimer then radioTimer:Cancel() end
+
+    isScanning = true
+    isCommercialPlaying = false
+    isNewsPlaying = false
+    
+    lcdDisplay.nowPlaying:SetText("*** SCANNING ***")
+    lcdDisplay.timerText:SetText("00:00 / 00:01")
+
+    local staticSFX = staticList[math.random(1, #staticList)]
+    PlaySoundFile(staticSFX, "SFX")
+
+    radioTimer = C_Timer.NewTimer(1.0, function()
+        isScanning = false
+        PlayRandomTrack()
+    end)
+end
+
 local function TurnOnRadio()
     songsPlayedSinceCommercial = 0
-    local freq = RadioFreeRazorwindDB and RadioFreeRazorwindDB.commercialFrequency or 2
-
-    -- Direct play if ads are disabled
-    if freq == 0 then
-        PlayRandomTrack()
+    songsPlayedSinceNews = 0
+    
+    if ShouldPlayNews() then
+        PlayNews()
+        return
+    elseif ShouldPlayCommercial() then
+        PlayCommercial()
         return
     end
 
-    isCommercialPlaying = true
-    local introText = "You're listening to Radio Free Razor wind! Don't touch that dial, plenty of tunes coming up!"
-    local introDuration = 6
-
-    trackStartTime = GetTime()
-    currentTrackDuration = introDuration
-    lcdDisplay.nowPlaying:SetText("STATION ID: RADIO FREE RAZORWIND")
-
-    SpeakTTS(introText)
-
-    local nextIndex = math.random(1, #musicPlaylist)
-    currentTrackIndex = nextIndex
-    local track = musicPlaylist[nextIndex]
-
-    SetCVar("Sound_EnableMusic", 1)
-    PlayMusic(track.fdid)
-
-    if radioTimer then radioTimer:Cancel() end
-
-    radioTimer = C_Timer.NewTimer(introDuration, function()
-        isCommercialPlaying = false
-        songsPlayedSinceCommercial = 1
-        
-        trackStartTime = GetTime() - introDuration
-        currentTrackDuration = track.duration
-        lcdDisplay.nowPlaying:SetText("PLAYING: " .. track.title:upper())
-
-        local remainingTime = track.duration - introDuration
-        radioTimer = C_Timer.NewTimer(remainingTime, function()
-            if ShouldPlayCommercial() then
-                PlayCommercial()
-            else
-                PlayRandomTrack()
-            end
-        end)
-    end)
+    PlayRandomTrack()
 end
 
 local function StopRadio()
@@ -287,13 +360,16 @@ local function StopRadio()
     end
     currentTrackIndex = nil
     isCommercialPlaying = false
+    isNewsPlaying = false
+    isScanning = false
     songsPlayedSinceCommercial = 0
+    songsPlayedSinceNews = 0
     lcdDisplay.nowPlaying:SetText("RADIO OFFLINE")
     lcdDisplay.timerText:SetText("00:00 / 00:00")
 end
 
 local function TogglePower()
-    if currentTrackIndex or isCommercialPlaying then
+    if currentTrackIndex or isCommercialPlaying or isNewsPlaying or isScanning then
         StopRadio()
     else
         TurnOnRadio()
@@ -301,7 +377,7 @@ local function TogglePower()
 end
 
 C_Timer.NewTicker(0.5, function()
-    if (currentTrackIndex or isCommercialPlaying) and currentTrackDuration > 0 then
+    if (currentTrackIndex or isCommercialPlaying or isNewsPlaying) and not isScanning and currentTrackDuration > 0 then
         local elapsed = math.floor(GetTime() - trackStartTime)
         if elapsed <= currentTrackDuration then
             lcdDisplay.timerText:SetText(FormatTime(elapsed) .. " / " .. FormatTime(currentTrackDuration))
@@ -310,7 +386,7 @@ C_Timer.NewTicker(0.5, function()
 end)
 
 --------------------------------------------------
--- DROPDOWN SELECTIONS (VOICE & COMMERCIAL FREQ)
+-- DROPDOWN SELECTIONS (VOICE, AD FREQ, NEWS FREQ)
 --------------------------------------------------
 local voiceDropdown = CreateFrame("Frame", "RFR_VoiceDropdown", mainFrame, "UIDropDownMenuTemplate")
 voiceDropdown:SetPoint("TOPLEFT", lcdDisplay, "BOTTOMLEFT", -15, -8)
@@ -322,7 +398,7 @@ local function InitializeVoiceDropdown(self, level)
 
     if #voices == 0 then
         local info = UIDropDownMenu_CreateInfo()
-        info.text = "Default System Voice"
+        info.text = "Default Voice"
         info.value = 0
         info.checked = (selectedID == 0)
         info.func = function()
@@ -341,7 +417,7 @@ local function InitializeVoiceDropdown(self, level)
         info.func = function()
             RadioFreeRazorwindDB.selectedVoiceID = voice.voiceID
             UIDropDownMenu_SetText(voiceDropdown, voice.name or ("Voice " .. voice.voiceID))
-            SpeakTTS("This is Radio Free Razor Wind, the hottest tunes this side of Molten Core!")
+            SpeakTTS("This is Radio Free Razor Wind!")
         end
         UIDropDownMenu_AddButton(info, level)
     end
@@ -351,7 +427,7 @@ local commDropdown = CreateFrame("Frame", "RFR_CommercialDropdown", mainFrame, "
 commDropdown:SetPoint("LEFT", voiceDropdown, "RIGHT", -25, 0)
 UIDropDownMenu_SetWidth(commDropdown, 120)
 
-local function GetFreqText(val)
+local function GetCommFreqText(val)
     if val == 0 then return "Ads: Disabled" end
     if val == 1 then return "Ads: Every Song" end
     return "Ads: Every " .. val .. " Songs"
@@ -375,35 +451,82 @@ local function InitializeCommDropdown(self, level)
         info.checked = (currentFreq == opt.value)
         info.func = function()
             RadioFreeRazorwindDB.commercialFrequency = opt.value
-            UIDropDownMenu_SetText(commDropdown, GetFreqText(opt.value))
+            UIDropDownMenu_SetText(commDropdown, GetCommFreqText(opt.value))
+        end
+        UIDropDownMenu_AddButton(info, level)
+    end
+end
+
+-- News Dropdown Configuration
+local newsDropdown = CreateFrame("Frame", "RFR_NewsDropdown", mainFrame, "UIDropDownMenuTemplate")
+newsDropdown:SetPoint("TOPLEFT", voiceDropdown, "BOTTOMLEFT", 0, 2)
+UIDropDownMenu_SetWidth(newsDropdown, 120)
+
+local function GetNewsFreqText(val)
+    if val == 0 then return "News: Disabled" end
+    if val == 1 then return "News: Every Song" end
+    return "News: Every " .. val .. " Songs"
+end
+
+local function InitializeNewsDropdown(self, level)
+    local currentFreq = RadioFreeRazorwindDB and RadioFreeRazorwindDB.newsFrequency or 5
+    local options = {
+        { text = "Disabled (Off)", value = 0 },
+        { text = "Every 1 Song (Debug)", value = 1 },
+        { text = "Every 5 Songs", value = 5 },
+        { text = "Every 10 Songs", value = 10 },
+        { text = "Every 15 Songs", value = 15 },
+        { text = "Every 20 Songs", value = 20 }
+    }
+
+    for _, opt in ipairs(options) do
+        local info = UIDropDownMenu_CreateInfo()
+        info.text = opt.text
+        info.value = opt.value
+        info.checked = (currentFreq == opt.value)
+        info.func = function()
+            RadioFreeRazorwindDB.newsFrequency = opt.value
+            UIDropDownMenu_SetText(newsDropdown, GetNewsFreqText(opt.value))
         end
         UIDropDownMenu_AddButton(info, level)
     end
 end
 
 --------------------------------------------------
+-- STREAMER MODE CONTROLS
+--------------------------------------------------
+local streamerCheck = CreateFrame("CheckButton", "RFR_StreamerCheck", mainFrame, "UICheckButtonTemplate")
+streamerCheck:SetPoint("TOPLEFT", newsDropdown, "BOTTOMLEFT", 15, -4)
+_G[streamerCheck:GetName() .. "Text"]:SetText("Enable Streamer Mode (Custom Commercial)")
+_G[streamerCheck:GetName() .. "Text"]:SetFontObject("GameFontHighlightSmall")
+
+streamerCheck:SetScript("OnClick", function(self)
+    RadioFreeRazorwindDB.streamerMode = self:GetChecked()
+end)
+
+local editBoxLabel = mainFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+editBoxLabel:SetPoint("TOPLEFT", streamerCheck, "BOTTOMLEFT", 0, -4)
+editBoxLabel:SetText("Custom Commercial Text:")
+
+local customEditBox = CreateFrame("EditBox", "RFR_CustomCommEditBox", mainFrame, "InputBoxTemplate")
+customEditBox:SetSize(310, 20)
+customEditBox:SetPoint("TOPLEFT", editBoxLabel, "BOTTOMLEFT", 5, -4)
+customEditBox:SetAutoFocus(false)
+customEditBox:SetMaxLetters(250)
+
+local function SaveCustomText(self)
+    RadioFreeRazorwindDB.customCommercial = self:GetText()
+    self:ClearFocus()
+end
+
+customEditBox:SetScript("OnEnterPressed", SaveCustomText)
+customEditBox:SetScript("OnEditFocusLost", SaveCustomText)
+
+--------------------------------------------------
 -- ANALOG CONTROLS & VOLUME SLIDER
 --------------------------------------------------
-local playBtn = CreateFrame("Button", nil, mainFrame, "UIPanelButtonTemplate")
-playBtn:SetSize(75, 24)
-playBtn:SetPoint("BOTTOMLEFT", mainFrame, "BOTTOMLEFT", 20, 45)
-playBtn:SetText("POWER")
-playBtn:SetScript("OnClick", function() TogglePower() end)
-
-local skipBtn = CreateFrame("Button", nil, mainFrame, "UIPanelButtonTemplate")
-skipBtn:SetSize(75, 24)
-skipBtn:SetPoint("LEFT", playBtn, "RIGHT", 8, 0)
-skipBtn:SetText("TUNE")
-skipBtn:SetScript("OnClick", function() PlayRandomTrack() end)
-
-local stopBtn = CreateFrame("Button", nil, mainFrame, "UIPanelButtonTemplate")
-stopBtn:SetSize(75, 24)
-stopBtn:SetPoint("LEFT", skipBtn, "RIGHT", 8, 0)
-stopBtn:SetText("MUTE")
-stopBtn:SetScript("OnClick", function() StopRadio() end)
-
 local volSlider = CreateFrame("Slider", "RFR_VolumeSlider", mainFrame, "OptionsSliderTemplate")
-volSlider:SetPoint("BOTTOMRIGHT", mainFrame, "BOTTOMRIGHT", -25, 18)
+volSlider:SetPoint("TOPLEFT", newsDropdown, "TOPRIGHT", -10, -5)
 volSlider:SetSize(110, 16)
 volSlider:SetMinMaxValues(0, 1)
 volSlider:SetValueStep(0.05)
@@ -416,6 +539,24 @@ _G[volSlider:GetName() .. "Text"]:SetText("VOLUME")
 volSlider:SetScript("OnValueChanged", function(self, value)
     SetCVar("Sound_MusicVolume", value)
 end)
+
+local playBtn = CreateFrame("Button", nil, mainFrame, "UIPanelButtonTemplate")
+playBtn:SetSize(90, 24)
+playBtn:SetPoint("BOTTOMLEFT", mainFrame, "BOTTOMLEFT", 25, 20)
+playBtn:SetText("POWER")
+playBtn:SetScript("OnClick", function() TogglePower() end)
+
+local skipBtn = CreateFrame("Button", nil, mainFrame, "UIPanelButtonTemplate")
+skipBtn:SetSize(90, 24)
+skipBtn:SetPoint("LEFT", playBtn, "RIGHT", 20, 0)
+skipBtn:SetText("TUNE")
+skipBtn:SetScript("OnClick", function() ScanAndTune() end)
+
+local stopBtn = CreateFrame("Button", nil, mainFrame, "UIPanelButtonTemplate")
+stopBtn:SetSize(90, 24)
+stopBtn:SetPoint("LEFT", skipBtn, "RIGHT", 20, 0)
+stopBtn:SetText("MUTE")
+stopBtn:SetScript("OnClick", function() StopRadio() end)
 
 local closeBtn = CreateFrame("Button", nil, mainFrame, "UIPanelCloseButton")
 closeBtn:SetPoint("TOPRIGHT", mainFrame, "TOPRIGHT", -2, -2)
@@ -441,7 +582,12 @@ SlashCmdList["RADIOFREERAZORWIND"] = function()
             end
         end
         UIDropDownMenu_SetText(voiceDropdown, currentName)
-        UIDropDownMenu_SetText(commDropdown, GetFreqText(RadioFreeRazorwindDB.commercialFrequency or 2))
+        UIDropDownMenu_SetText(commDropdown, GetCommFreqText(RadioFreeRazorwindDB.commercialFrequency or 2))
+        UIDropDownMenu_SetText(newsDropdown, GetNewsFreqText(RadioFreeRazorwindDB.newsFrequency or 5))
+
+        -- Refresh Streamer Mode UI elements
+        streamerCheck:SetChecked(RadioFreeRazorwindDB.streamerMode or false)
+        customEditBox:SetText(RadioFreeRazorwindDB.customCommercial or "")
     end
 end
 
@@ -450,7 +596,15 @@ eventFrame:RegisterEvent("ADDON_LOADED")
 eventFrame:SetScript("OnEvent", function(self, event, loadedAddon)
     if loadedAddon == "RadioFreeRazorwind" then
         if not RadioFreeRazorwindDB then 
-            RadioFreeRazorwindDB = { radioEnabled = true, volume = 1.0, selectedVoiceID = 0, commercialFrequency = 2 }
+            RadioFreeRazorwindDB = { 
+                radioEnabled = true, 
+                volume = 1.0, 
+                selectedVoiceID = 0, 
+                commercialFrequency = 2, 
+                newsFrequency = 5,
+                streamerMode = false,
+                customCommercial = "Support the stream at twitch.tv/yourchannel!"
+            }
         end
         if RadioFreeRazorwindDB.selectedVoiceID == nil then 
             RadioFreeRazorwindDB.selectedVoiceID = 0 
@@ -458,9 +612,19 @@ eventFrame:SetScript("OnEvent", function(self, event, loadedAddon)
         if RadioFreeRazorwindDB.commercialFrequency == nil then
             RadioFreeRazorwindDB.commercialFrequency = 2
         end
+        if RadioFreeRazorwindDB.newsFrequency == nil then
+            RadioFreeRazorwindDB.newsFrequency = 5
+        end
+        if RadioFreeRazorwindDB.streamerMode == nil then
+            RadioFreeRazorwindDB.streamerMode = false
+        end
+        if not RadioFreeRazorwindDB.customCommercial then
+            RadioFreeRazorwindDB.customCommercial = "Support the stream at twitch.tv/yourchannel!"
+        end
         
         UIDropDownMenu_Initialize(voiceDropdown, InitializeVoiceDropdown)
         UIDropDownMenu_Initialize(commDropdown, InitializeCommDropdown)
+        UIDropDownMenu_Initialize(newsDropdown, InitializeNewsDropdown)
         
         print("|cFF00FF00[Radio Free Razorwind]|r Broadcast online! Type /rfr to open controls.")
     end
